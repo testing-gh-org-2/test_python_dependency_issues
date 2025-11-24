@@ -8,11 +8,23 @@ import pickle
 import hashlib
 import sqlite3
 import random
-from flask import request, Flask
+import subprocess
+import xml.etree.ElementTree as ET
+import tempfile
+import yaml
+import json
+import urllib.request
+import base64
+import logging
+from flask import request, Flask, render_template_string, send_file, redirect, make_response, session
+from jinja2 import Template
+import requests
 
 app = Flask(__name__)
+app.secret_key = 'hardcoded_secret_key'  # CWE-798: Hard-coded credentials
 
 # ========== COMMON PYTHON VULNERABILITIES ==========
+
 
 # 1. Command Injection (CWE-78) - CRITICAL
 @app.route('/execute')
@@ -22,1092 +34,1071 @@ def execute_command():
     os.system(user_input)  # Vulnerable - no sanitization
     return "Command executed"
 
+# 2. CVE-2022-31631: Insecure pickle deserialization (Flask)
+# Reference: https://nvd.nist.gov/vuln/detail/CVE-2022-31631
+@app.route('/unsafe_deserialize', methods=['POST'])
+def unsafe_deserialize():
+    """Vulnerable endpoint: unsafe deserialization using pickle.loads on user input."""
+    data = request.data
+    # Vulnerable: directly deserializing user-supplied data
+    obj = pickle.loads(data)
+    return f"Deserialized object: {obj}"
 
-# 2. SQL Injection (CWE-89) - CRITICAL
-@app.route('/query_user')
-def query_user():
+# 3. Dependency Vulnerability Example (CVE-2016-7401: PyYAML unsafe load)
+# Reference: https://nvd.nist.gov/vuln/detail/CVE-2016-7401
+@app.route('/yaml_load', methods=['POST'])
+def yaml_load_vuln():
+    """Vulnerable endpoint: unsafe yaml.load() usage."""
+    yaml_data = request.data
+    # Vulnerable: using yaml.load() without Loader argument (can execute arbitrary code)
+    obj = yaml.load(yaml_data)
+    return f"Loaded YAML object: {obj}"
+
+# 4. SQL Injection (CWE-89) - CRITICAL
+@app.route('/user/<username>')
+def get_user(username):
     """SQL injection via string concatenation"""
-    username = request.args.get('username', '')
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
-    # Vulnerable - user input concatenated into query
-    query = f"SELECT * FROM users WHERE username = '{username}'"
+    query = f"SELECT * FROM users WHERE username = '{username}'"  # Vulnerable
     cursor.execute(query)
-    result = cursor.fetchall()
-    conn.close()
-    return str(result)
+    return str(cursor.fetchall())
 
-
-# 3. Code Injection via eval() (CWE-94) - CRITICAL
-@app.route('/calculate')
-def calculate():
-    """Code injection via eval()"""
-    expr = request.args.get('expr', '1+1')
-    result = eval(expr)  # Vulnerable - arbitrary code execution
-    return f"Result: {result}"
-
-
-# 4. Code Injection via exec() (CWE-94) - CRITICAL
-@app.route('/exec_code')
-def exec_code():
-    """Code injection via exec()"""
-    code = request.args.get('code', 'print("hello")')
-    exec(code)  # Vulnerable - arbitrary code execution
-    return "Code executed"
-
-
-# 5. Unsafe Deserialization (CWE-502) - CRITICAL
-@app.route('/load_data', methods=['POST'])
-def load_data():
-    """Pickle deserialization vulnerability"""
-    data = request.data
-    obj = pickle.loads(data)  # Vulnerable - unsafe deserialization
-    return str(obj)
-
-
-# 6. Path Traversal (CWE-22) - HIGH
-@app.route('/read_file')
-def read_file():
+# 5. Path Traversal (CWE-22) - HIGH
+@app.route('/download')
+def download_file():
     """Path traversal vulnerability"""
-    filename = request.args.get('file', 'readme.txt')
-    # Vulnerable - no path sanitization
-    with open(filename, 'r') as f:
-        content = f.read()
-    return content
+    filename = request.args.get('file')
+    return send_file(f'/var/www/uploads/{filename}')  # Vulnerable - no validation
 
+# 6. XSS via Template Injection (CWE-79) - HIGH
+@app.route('/greet')
+def greet():
+    """Cross-Site Scripting via template injection"""
+    name = request.args.get('name', 'Guest')
+    template = f"<h1>Hello {name}</h1>"  # Vulnerable
+    return render_template_string(template)
 
-# 7. Weak Cryptographic Hash (CWE-327) - MEDIUM
-def hash_password(password):
-    """Using weak MD5 for passwords"""
-    # Vulnerable - MD5 is cryptographically broken
-    return hashlib.md5(password.encode()).hexdigest()
+# 7. Server-Side Template Injection (CWE-94) - CRITICAL
+@app.route('/render')
+def render_template():
+    """SSTI vulnerability with Jinja2"""
+    user_template = request.args.get('template', '')
+    tmpl = Template(user_template)  # Vulnerable
+    return tmpl.render()
 
-
-# 8. Hardcoded Credentials (CWE-798) - HIGH
-def connect_database():
-    """Hardcoded database credentials"""
-    DB_HOST = "localhost"
-    DB_USER = "admin"
-    DB_PASS = "Password123!"  # Vulnerable - hardcoded password
-    return f"Connecting to {DB_HOST} as {DB_USER}"
-
-
-# 9. Insecure Random Number Generation (CWE-330) - MEDIUM
-def generate_token():
-    """Using insecure random for security token"""
-    # Vulnerable - random is not cryptographically secure
-    return str(random.randint(100000, 999999))
-
-
-# 10. Plain Text Password Storage (CWE-256) - HIGH
-@app.route('/register', methods=['POST'])
-def register():
-    """Storing passwords in plain text"""
-    username = request.form.get('username')
-    password = request.form.get('password')
-    # Vulnerable - password stored without hashing
-    with open('users.txt', 'a') as f:
-        f.write(f"{username}:{password}\n")
-    return "User registered"
-
-
-# 11. Unvalidated Redirect (CWE-601) - MEDIUM
-@app.route('/redirect')
-def redirect_url():
-    """Open redirect vulnerability"""
-    url = request.args.get('url', '/')
-    # Vulnerable - no URL validation
-    return f'<meta http-equiv="refresh" content="0; url={url}">'
-
-
-# 12. Missing Input Validation (CWE-20) - MEDIUM
-@app.route('/process')
-def process_input():
-    """No input validation"""
-    data = request.args.get('data', '')
-    # Vulnerable - no validation of input type or content
-    result = int(data) * 100  # Could cause ValueError
-    return str(result)
-
-
-# 13. Race Condition (CWE-362) - MEDIUM
-@app.route('/write_file')
-def write_file():
-    """Race condition in file operations"""
-    filename = 'temp.txt'
-    # Vulnerable - check and use not atomic
-    if not os.path.exists(filename):
-        with open(filename, 'w') as f:
-            f.write('data')
-    return "File written"
-
-
-# 14. Information Exposure (CWE-209) - LOW
-@app.route('/divide')
-def divide():
-    """Verbose error messages"""
-    try:
-        a = int(request.args.get('a', 10))
-        b = int(request.args.get('b', 0))
-        result = a / b
-        return str(result)
-    except Exception as e:
-        # Vulnerable - exposes internal details
-        import traceback
-        return f"Error: {traceback.format_exc()}"
-
-
-# 15. Improper Exception Handling (CWE-755) - LOW
-@app.route('/parse_json')
-def parse_json():
-    """Catching all exceptions"""
-    try:
-        data = request.get_json()
-        return str(data)
-    except:  # Vulnerable - bare except clause
-        return "Error"
-
-
-# 16. Use of Assert in Production (CWE-617) - LOW
-@app.route('/validate')
-def validate():
-    """Using assert for security checks"""
-    is_admin = request.args.get('admin', 'false')
-    # Vulnerable - assert can be disabled with -O flag
-    assert is_admin == 'true', "Not admin"
-    return "Admin access granted"
-
-
-# 17. Timing Attack (CWE-208) - MEDIUM
-@app.route('/check_password')
-def check_password():
-    """Timing attack on password comparison"""
-    password = request.args.get('password', '')
-    correct_password = "SecretPass123"
-    # Vulnerable - direct string comparison reveals timing info
-    if password == correct_password:
-        return "Access granted"
-    return "Access denied"
-
-
-# 18. Missing Security Headers (CWE-693) - LOW
-@app.route('/page')
-def serve_page():
-    """No security headers"""
-    # Vulnerable - missing X-Frame-Options, CSP, etc.
-    return "<h1>Welcome</h1>"
-
-
-# 19. Insecure File Permissions (CWE-732) - MEDIUM
-def create_sensitive_file():
-    """Creating file with insecure permissions"""
-    filename = 'sensitive.txt'
-    with open(filename, 'w') as f:
-        f.write('secret data')
-    # Vulnerable - world-readable permissions
-    os.chmod(filename, 0o777)
-
-
-# 20. Missing Authorization Check (CWE-862) - HIGH
-@app.route('/admin/delete_user')
-def delete_user():
-    """No authorization check"""
-    user_id = request.args.get('id')
-    # Vulnerable - no check if requester is admin
-    return f"Deleted user {user_id}"
-
-
-# ========== EMERGING & LATEST CODEQL VULNERABILITIES (2024-2025) ==========
-
-# 21. AI/ML Model Injection (CWE-502) - CRITICAL
-# New query added in CodeQL 2.15+ for AI/ML vulnerabilities
-@app.route('/load_model', methods=['POST'])
-def load_ml_model():
-    """Unsafe ML model deserialization - PyTorch/TensorFlow"""
-    import torch
-    model_data = request.data
-    # Vulnerable - untrusted model loading can execute arbitrary code
-    model = torch.load(model_data)  # CodeQL: py/unsafe-deserialization
-    return "Model loaded"
-
-
-# 22. Server-Side Template Injection (SSTI) via Jinja2 (CWE-94) - CRITICAL
-# Enhanced detection in CodeQL 2.14+
-@app.route('/render_template')
-def render_user_template():
-    """SSTI vulnerability in Jinja2"""
-    from flask import render_template_string
-    template = request.args.get('template', 'Hello World')
-    # Vulnerable - user input rendered as template
-    return render_template_string(template)  # CodeQL: py/ssti
-
-
-# 23. NoSQL Injection - MongoDB (CWE-943) - HIGH
-# Added in CodeQL 2.16+ for NoSQL databases
-@app.route('/find_user')
-def find_user_nosql():
-    """NoSQL injection in MongoDB queries"""
-    from pymongo import MongoClient
-    username = request.args.get('username', '')
-    client = MongoClient('mongodb://localhost:27017/')
-    db = client['mydb']
-    # Vulnerable - unsanitized input in NoSQL query
-    user = db.users.find_one({"username": username})  # CodeQL: py/nosql-injection
-    return str(user)
-
-
-# 24. Prototype Pollution via JSON (CWE-1321) - HIGH
-# New pattern detection in CodeQL 2.15+
-@app.route('/merge_config', methods=['POST'])
-def merge_config():
-    """Prototype pollution through recursive merge"""
-    import json
-    user_config = json.loads(request.data)
-    default_config = {'setting': 'value'}
-    
-    def merge(target, source):
-        # Vulnerable - no protection against __proto__ pollution
-        for key, value in source.items():
-            if isinstance(value, dict):
-                target[key] = merge(target.get(key, {}), value)
-            else:
-                target[key] = value  # CodeQL: py/prototype-pollution
-        return target
-    
-    result = merge(default_config, user_config)
-    return str(result)
-
-
-# 25. JWT Algorithm Confusion (CWE-347) - HIGH
-# Enhanced detection in CodeQL 2.14+
-@app.route('/verify_token')
-def verify_jwt():
-    """JWT algorithm confusion attack"""
-    import jwt
-    token = request.headers.get('Authorization', '').replace('Bearer ', '')
-    # Vulnerable - accepts any algorithm, including 'none'
-    decoded = jwt.decode(token, verify=False)  # CodeQL: py/jwt-missing-verification
-    return str(decoded)
-
-
-# 26. Path Traversal in ZIP Extraction (CWE-23) - HIGH
-# Zip Slip vulnerability - enhanced detection in CodeQL 2.15+
-@app.route('/extract_zip', methods=['POST'])
-def extract_zip():
-    """Zip Slip vulnerability"""
-    import zipfile
-    import io
-    
-    zip_data = request.data
-    zip_file = zipfile.ZipFile(io.BytesIO(zip_data))
-    
-    for member in zip_file.namelist():
-        # Vulnerable - no path validation before extraction
-        zip_file.extract(member, '/tmp/uploads/')  # CodeQL: py/zipslip
-    
-    return "Extracted"
-
-
-# 27. GraphQL Injection (CWE-89) - HIGH
-# New query for GraphQL vulnerabilities in CodeQL 2.16+
-@app.route('/graphql', methods=['POST'])
-def graphql_query():
-    """GraphQL injection vulnerability"""
-    query = request.json.get('query', '')
-    # Vulnerable - unsanitized GraphQL query
-    result = f"{{ user(id: {query}) {{ name email }} }}"  # CodeQL: py/graphql-injection
-    return result
-
-
-# 28. LDAP Injection (CWE-90) - HIGH
-# Enhanced pattern detection in CodeQL 2.14+
-@app.route('/ldap_auth')
-def ldap_authenticate():
-    """LDAP injection via filter"""
-    username = request.args.get('username', '')
-    password = request.args.get('password', '')
-    # Vulnerable - unsanitized LDAP filter
-    ldap_filter = f"(&(uid={username})(password={password}))"  # CodeQL: py/ldap-injection
-    return f"Filter: {ldap_filter}"
-
-
-# 29. XML Bomb (Billion Laughs) (CWE-776) - MEDIUM
-# Enhanced XXE detection in CodeQL 2.15+
-@app.route('/parse_large_xml', methods=['POST'])
-def parse_xml_bomb():
-    """XML bomb/billion laughs attack"""
-    from xml.etree import ElementTree as ET
+# 8. XXE Injection (CWE-611) - HIGH
+@app.route('/parse_xml', methods=['POST'])
+def parse_xml():
+    """XML External Entity injection"""
     xml_data = request.data
-    # Vulnerable - no entity expansion limits
-    tree = ET.fromstring(xml_data)  # CodeQL: py/xxe-local
-    return "Parsed"
+    tree = ET.fromstring(xml_data)  # Vulnerable - no defusedxml
+    return str(tree.tag)
 
+# 9. Insecure Deserialization (CWE-502) - CRITICAL
+@app.route('/load_object', methods=['POST'])
+def load_object():
+    """Insecure deserialization"""
+    data = request.data
+    obj = pickle.loads(data)  # Vulnerable
+    return str(type(obj))
 
-# 30. Regex Denial of Service (ReDoS) (CWE-1333) - MEDIUM
-# Enhanced ReDoS detection in CodeQL 2.14+
-@app.route('/validate_email')
-def validate_email():
-    """ReDoS via catastrophic backtracking"""
-    import re
-    email = request.args.get('email', '')
-    # Vulnerable - exponential time complexity regex
-    pattern = r'^([a-zA-Z0-9])(([\\.-]|[_]+)?([a-zA-Z0-9]+))*(@){1}[a-z0-9]+[.]{1}(([a-z]{2,3})|([a-z]{2,3}[.]{1}[a-z]{2,3}))$'
-    result = re.match(pattern, email)  # CodeQL: py/polynomial-redos
-    return str(result)
-
-
-# 31. DNS Rebinding via SSRF (CWE-918) - HIGH
-# Enhanced SSRF detection in CodeQL 2.16+
-@app.route('/fetch_external')
-def fetch_external_resource():
-    """DNS rebinding attack via SSRF"""
-    import urllib.request
-    url = request.args.get('url', '')
-    # Vulnerable - no DNS rebinding protection
-    response = urllib.request.urlopen(url, timeout=30)  # CodeQL: py/full-ssrf
+# 10. SSRF (CWE-918) - HIGH
+@app.route('/fetch')
+def fetch_url():
+    """Server-Side Request Forgery"""
+    url = request.args.get('url')
+    response = urllib.request.urlopen(url)  # Vulnerable - no validation
     return response.read()
 
+# 11. Weak Cryptography - MD5 (CWE-327) - MEDIUM
+@app.route('/hash')
+def hash_password():
+    """Using weak MD5 hash"""
+    password = request.args.get('password')
+    hashed = hashlib.md5(password.encode()).hexdigest()  # Vulnerable
+    return hashed
 
-# 32. Insecure Cryptographic Storage - AWS KMS (CWE-320) - HIGH
-# Cloud-specific vulnerability detection in CodeQL 2.15+
-@app.route('/encrypt_data')
-def encrypt_with_weak_kms():
-    """Weak encryption configuration"""
-    import boto3
-    data = request.args.get('data', '')
-    kms = boto3.client('kms')
-    # Vulnerable - using deprecated encryption algorithm
-    response = kms.encrypt(
-        KeyId='alias/mykey',
-        Plaintext=data,
-        EncryptionAlgorithm='RSAES_PKCS1_V1_5'  # Deprecated
-    )  # CodeQL: py/weak-crypto-algorithm
-    return str(response)
+# 12. Hard-coded Credentials (CWE-798) - HIGH
+def connect_to_database():
+    """Hard-coded database credentials"""
+    username = "admin"  # Vulnerable
+    password = "password123"  # Vulnerable
+    return f"Connecting with {username}:{password}"
 
+# 13. Information Disclosure (CWE-209) - MEDIUM
+@app.route('/error')
+def error_handler():
+    """Detailed error messages"""
+    try:
+        1 / 0
+    except Exception as e:
+        return f"Error: {str(e)} {e.__traceback__}"  # Vulnerable
 
-# 33. HTTP Response Splitting (CWE-113) - MEDIUM
-# Enhanced header injection detection in CodeQL 2.14+
-@app.route('/set_header')
-def set_custom_header():
-    """HTTP response splitting via header injection"""
-    from flask import make_response
-    custom_value = request.args.get('value', '')
-    response = make_response("OK")
-    # Vulnerable - unsanitized header value
-    response.headers['Custom-Header'] = custom_value  # CodeQL: py/http-response-splitting
-    return response
+# 14. Insecure Random (CWE-330) - MEDIUM
+@app.route('/generate_token')
+def generate_token():
+    """Using insecure random for security token"""
+    token = random.randint(1000, 9999)  # Vulnerable - not cryptographically secure
+    return str(token)
 
+# 15. Code Injection via eval (CWE-95) - CRITICAL
+@app.route('/calculate')
+def calculate():
+    """Code injection via eval"""
+    expression = request.args.get('expr')
+    result = eval(expression)  # Vulnerable
+    return str(result)
 
-# 34. Insecure Randomness in Crypto Context (CWE-338) - MEDIUM
-# Enhanced random detection in CodeQL 2.15+
-@app.route('/generate_crypto_key')
-def generate_weak_key():
-    """Using non-cryptographic random for keys"""
-    import random
-    # Vulnerable - predictable key generation
-    key = ''.join([str(random.randint(0, 9)) for _ in range(32)])  # CodeQL: py/insecure-randomness
-    return key
+# 16. Open Redirect (CWE-601) - MEDIUM
+@app.route('/redirect')
+def open_redirect():
+    """Open redirect vulnerability"""
+    url = request.args.get('url')
+    return redirect(url)  # Vulnerable - no validation
 
+# 17. Missing Authentication (CWE-306) - HIGH
+@app.route('/admin/delete_user')
+def delete_user():
+    """Missing authentication check"""
+    user_id = request.args.get('id')
+    return f"User {user_id} deleted"  # Vulnerable - no auth check
 
-# 35. CORS Misconfiguration (CWE-942) - MEDIUM
-# New CORS detection in CodeQL 2.16+
-@app.route('/api/data')
-def api_with_bad_cors():
-    """Overly permissive CORS configuration"""
-    from flask import make_response
-    response = make_response({"data": "sensitive"})
-    origin = request.headers.get('Origin', '')
-    # Vulnerable - reflects any origin without validation
-    response.headers['Access-Control-Allow-Origin'] = origin  # CodeQL: py/cors-misconfiguration
-    response.headers['Access-Control-Allow-Credentials'] = 'true'
-    return response
+# 18. CSRF Missing Token (CWE-352) - MEDIUM
+@app.route('/transfer', methods=['POST'])
+def transfer_money():
+    """Missing CSRF protection"""
+    amount = request.form.get('amount')
+    return f"Transferred ${amount}"  # Vulnerable - no CSRF token
 
+# 19. Insecure Cookie (CWE-614) - MEDIUM
+@app.route('/set_cookie')
+def set_cookie():
+    """Insecure cookie without secure flags"""
+    resp = make_response("Cookie set")
+    resp.set_cookie('session', 'abc123')  # Vulnerable - no secure, httponly flags
+    return resp
 
-# 36. Unvalidated Forward/Redirect (CWE-601) - MEDIUM
-# Enhanced open redirect detection in CodeQL 2.14+
-@app.route('/forward')
-def forward_request():
-    """Unvalidated forward/redirect"""
-    from flask import redirect
-    target = request.args.get('next', '/')
-    # Vulnerable - no allowlist validation
-    return redirect(target)  # CodeQL: py/url-redirection
+# 20. Debug Mode Enabled (CWE-489) - HIGH
+# app.run(debug=True) in production - Vulnerable
 
+# 21. subprocess with shell=True (CWE-78) - CRITICAL
+@app.route('/ping')
+def ping_host():
+    """Command injection via subprocess"""
+    host = request.args.get('host')
+    result = subprocess.run(f'ping -c 1 {host}', shell=True, capture_output=True)  # Vulnerable
+    return result.stdout.decode()
 
-# 37. Log Injection (CWE-117) - MEDIUM
-# New log injection detection in CodeQL 2.15+
-@app.route('/log_event')
-def log_user_input():
-    """Log injection vulnerability"""
-    import logging
-    user_input = request.args.get('message', '')
-    # Vulnerable - unvalidated input in logs
-    logging.info(f"User message: {user_input}")  # CodeQL: py/log-injection
-    return "Logged"
+# 22. Weak Password Hashing (CWE-916) - HIGH
+@app.route('/register')
+def register_user():
+    """Weak password hashing"""
+    password = request.args.get('password')
+    hashed = base64.b64encode(password.encode()).decode()  # Vulnerable - base64 is not hashing
+    return f"Password stored: {hashed}"
 
+# 23. Unvalidated File Upload (CWE-434) - HIGH
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    """Unrestricted file upload"""
+    file = request.files['file']
+    file.save(f'/uploads/{file.filename}')  # Vulnerable - no validation
+    return "File uploaded"
 
-# 38. Improper Certificate Validation (CWE-295) - HIGH
-# Enhanced TLS/SSL detection in CodeQL 2.16+
+# 24. Integer Overflow (CWE-190) - MEDIUM
+@app.route('/multiply')
+def multiply():
+    """Potential integer overflow"""
+    a = int(request.args.get('a', 0))
+    b = int(request.args.get('b', 0))
+    return str(a * b)  # Vulnerable - no overflow check
+
+# 25. Race Condition (CWE-366) - MEDIUM
+counter = 0
+@app.route('/increment')
+def increment():
+    """Race condition in counter"""
+    global counter
+    counter += 1  # Vulnerable - no locking
+    return str(counter)
+
+# 26. Use of Dangerous Function (CWE-242) - HIGH
+@app.route('/compile')
+def compile_code():
+    """Using compile() with user input"""
+    code = request.args.get('code')
+    compiled = compile(code, '<string>', 'exec')  # Vulnerable
+    return "Code compiled"
+
+# 27. Weak SSL/TLS (CWE-326) - HIGH
+import ssl
+def insecure_connection():
+    """Disabling SSL verification"""
+    context = ssl._create_unverified_context()  # Vulnerable
+    return context
+
+# 28. Directory Listing (CWE-548) - LOW
+@app.route('/files/<path:filepath>')
+def list_files(filepath):
+    """Directory traversal and listing"""
+    return str(os.listdir(filepath))  # Vulnerable
+
+# 29. Null Pointer Dereference (CWE-476) - MEDIUM
+@app.route('/get_value')
+def get_value():
+    """Potential null dereference"""
+    data = request.args.get('data')
+    return data.upper()  # Vulnerable - no None check
+
+# 30. Uncontrolled Resource Consumption (CWE-400) - HIGH
+@app.route('/allocate')
+def allocate_memory():
+    """DoS via memory allocation"""
+    size = int(request.args.get('size', 0))
+    data = [0] * size  # Vulnerable - no limit
+    return f"Allocated {len(data)} items"
+
+# 31. Improper Certificate Validation (CWE-295) - HIGH
 @app.route('/fetch_https')
-def fetch_with_no_cert_validation():
-    """Disabling SSL certificate verification"""
-    import requests
-    url = request.args.get('url', '')
-    # Vulnerable - SSL verification disabled
-    response = requests.get(url, verify=False)  # CodeQL: py/request-without-cert-validation
+def fetch_https():
+    """Disabling certificate verification"""
+    url = request.args.get('url')
+    response = requests.get(url, verify=False)  # Vulnerable
     return response.text
 
+# 32. Cleartext Storage of Sensitive Info (CWE-312) - HIGH
+@app.route('/store_password')
+def store_password():
+    """Storing password in cleartext"""
+    password = request.args.get('password')
+    with open('passwords.txt', 'a') as f:
+        f.write(f"{password}\n")  # Vulnerable
+    return "Password stored"
 
-# 39. Sensitive Data in URL (CWE-598) - LOW
-# New pattern detection in CodeQL 2.15+
-@app.route('/process_payment')
-def process_payment_with_sensitive_url():
-    """Sensitive data in GET parameters"""
-    # Vulnerable - sensitive data in URL (logged, cached, etc.)
-    credit_card = request.args.get('cc', '')  # CodeQL: py/sensitive-data-in-url
-    cvv = request.args.get('cvv', '')
-    return f"Processing card ending in {credit_card[-4:]}"
-
-
-# 40. Use of Hardcoded IV/Salt (CWE-329) - MEDIUM
-# Enhanced crypto pattern detection in CodeQL 2.16+
-@app.route('/encrypt_aes')
-def encrypt_with_hardcoded_iv():
-    """Hardcoded IV in encryption"""
-    from Crypto.Cipher import AES
-    data = request.args.get('data', '').encode()
+# 33. Hardcoded IV (CWE-329) - MEDIUM
+from Crypto.Cipher import AES
+def encrypt_data(data):
+    """Using hardcoded IV"""
     key = b'Sixteen byte key'
-    # Vulnerable - hardcoded IV
-    iv = b'1234567890123456'  # CodeQL: py/hardcoded-iv
+    iv = b'1234567890123456'  # Vulnerable - hardcoded IV
     cipher = AES.new(key, AES.MODE_CBC, iv)
-    encrypted = cipher.encrypt(data.ljust(16))
-    return encrypted.hex()
+    return cipher.encrypt(data)
 
+# 34. Missing Input Validation (CWE-20) - HIGH
+@app.route('/age')
+def check_age():
+    """Missing input validation"""
+    age = request.args.get('age')
+    return f"Age is {int(age)}"  # Vulnerable - no validation
 
-# 41. XML External Entity via lxml (CWE-611) - HIGH
-@app.route('/parse_lxml', methods=['POST'])
-def parse_with_lxml():
-    """XXE via lxml parser"""
-    from lxml import etree
-    xml_data = request.data
-    parser = etree.XMLParser(resolve_entities=True)  # Vulnerable
-    tree = etree.fromstring(xml_data, parser)
-    return etree.tostring(tree).decode()
+# 35. Log Injection (CWE-117) - MEDIUM
+@app.route('/log')
+def log_message():
+    """Log injection vulnerability"""
+    message = request.args.get('message')
+    logging.info(f"User message: {message}")  # Vulnerable - no sanitization
+    return "Logged"
 
+# 36. Unrestricted Upload of Dangerous File Type (CWE-434) - CRITICAL
+@app.route('/upload_script', methods=['POST'])
+def upload_script():
+    """Allowing executable file upload"""
+    file = request.files['file']
+    file.save(f'/var/www/scripts/{file.filename}')  # Vulnerable
+    os.chmod(f'/var/www/scripts/{file.filename}', 0o777)
+    return "Script uploaded"
 
-# 42. SQL Injection in ORM (CWE-89) - HIGH
-@app.route('/orm_query')
-def orm_sql_injection():
-    """SQL injection via raw SQL in ORM"""
-    from sqlalchemy import create_engine, text
-    username = request.args.get('username', '')
-    engine = create_engine('sqlite:///users.db')
-    query = text(f"SELECT * FROM users WHERE name = '{username}'")  # Vulnerable
-    with engine.connect() as conn:
-        result = conn.execute(query)
-    return str(list(result))
+# 37. Insecure Direct Object Reference (CWE-639) - HIGH
+@app.route('/file/<file_id>')
+def get_file(file_id):
+    """IDOR vulnerability"""
+    return send_file(f'/files/{file_id}')  # Vulnerable - no access control
 
+# 38. Use of Hard-coded Password (CWE-259) - HIGH
+API_KEY = "sk-1234567890abcdef"  # Vulnerable - hardcoded API key
 
-# 43. Insecure Direct Object Reference (CWE-639) - MEDIUM
-@app.route('/get_document/<doc_id>')
-def get_document(doc_id):
-    """IDOR - no ownership check"""
-    # Vulnerable - no check if user owns document
-    with open(f'/documents/{doc_id}.txt', 'r') as f:
-        return f.read()
+# 39. Improper Neutralization of CRLF (CWE-93) - MEDIUM
+@app.route('/set_header')
+def set_header():
+    """CRLF injection in headers"""
+    value = request.args.get('value')
+    resp = make_response("OK")
+    resp.headers['X-Custom'] = value  # Vulnerable
+    return resp
 
+# 40. Missing Encryption (CWE-311) - HIGH
+@app.route('/send_data', methods=['POST'])
+def send_data():
+    """Sending sensitive data without encryption"""
+    ssn = request.form.get('ssn')
+    # Send over HTTP without encryption - Vulnerable
+    return f"SSN {ssn} received"
 
-# 44. Mass Assignment (CWE-915) - MEDIUM
+# 41. Insufficient Logging (CWE-778) - LOW
+@app.route('/sensitive_action')
+def sensitive_action():
+    """No logging for security events"""
+    # Performing sensitive action without logging - Vulnerable
+    return "Action performed"
+
+# 42. Improper Error Handling (CWE-755) - MEDIUM
+@app.route('/divide')
+def divide():
+    """Poor error handling"""
+    a = int(request.args.get('a'))
+    b = int(request.args.get('b'))
+    return str(a / b)  # Vulnerable - no exception handling
+
+# 43. Time-of-check Time-of-use (CWE-367) - MEDIUM
+@app.route('/read_file')
+def read_file():
+    """TOCTOU race condition"""
+    filepath = request.args.get('path')
+    if os.path.exists(filepath):  # Check
+        with open(filepath, 'r') as f:  # Use - Vulnerable
+            return f.read()
+    return "File not found"
+
+# 44. Incorrect Permission Assignment (CWE-732) - HIGH
+@app.route('/create_file')
+def create_file():
+    """Creating file with overly permissive permissions"""
+    filename = request.args.get('name')
+    with open(filename, 'w') as f:
+        f.write("data")
+    os.chmod(filename, 0o777)  # Vulnerable - world writable
+    return "File created"
+
+# 45. Using GET for State-Changing Operations (CWE-650) - MEDIUM
+@app.route('/delete')
+def delete_account():
+    """Using GET for deletion"""
+    user_id = request.args.get('id')
+    return f"Account {user_id} deleted"  # Vulnerable - should use POST
+
+# 46. Mass Assignment (CWE-915) - MEDIUM
 @app.route('/update_profile', methods=['POST'])
 def update_profile():
     """Mass assignment vulnerability"""
-    user_data = request.json
-    # Vulnerable - allows setting is_admin field
-    user = {'name': user_data.get('name'), 
-            'email': user_data.get('email'),
-            'is_admin': user_data.get('is_admin', False)}  # Dangerous
+    user = {}
+    for key, value in request.form.items():
+        user[key] = value  # Vulnerable - allows setting any field
     return str(user)
 
+# 47. Sensitive Data in URL (CWE-598) - MEDIUM
+@app.route('/reset_password')
+def reset_password():
+    """Sensitive data in URL"""
+    token = request.args.get('token')  # Vulnerable - token in URL
+    new_password = request.args.get('password')  # Vulnerable
+    return f"Password reset with token {token}"
 
-# 45. Server-Side Request Forgery via URL (CWE-918) - HIGH
-@app.route('/proxy')
-def proxy_request():
-    """SSRF with no validation"""
-    import urllib.request
-    target = request.args.get('url', '')
-    # Vulnerable - can access internal services
-    req = urllib.request.Request(target)
-    response = urllib.request.urlopen(req)
-    return response.read()
-
-
-# 46. Insecure Deserialization - YAML (CWE-502) - CRITICAL
-@app.route('/load_yaml', methods=['POST'])
-def load_yaml_unsafe():
-    """Unsafe YAML loading"""
-    import yaml
-    data = request.data.decode()
-    # Vulnerable - allows arbitrary object instantiation
-    config = yaml.load(data, Loader=yaml.Loader)
-    return str(config)
-
-
-# 47. Buffer Overflow via ctypes (CWE-120) - HIGH
-@app.route('/buffer_test')
-def buffer_overflow():
-    """Buffer overflow in C library call"""
-    import ctypes
-    user_input = request.args.get('data', '')
-    buffer = ctypes.create_string_buffer(10)
-    # Vulnerable - no bounds checking
-    ctypes.memmove(buffer, user_input.encode(), len(user_input))
-    return buffer.value.decode()
-
-
-# 48. Use of GET for State-Changing Operations (CWE-650) - MEDIUM
-@app.route('/delete_account')
-def delete_account_get():
-    """State-changing operation via GET"""
-    user_id = request.args.get('id')
-    # Vulnerable - GET should not modify state
-    return f"Account {user_id} deleted"
-
-
-# 49. Insufficient Session Expiration (CWE-613) - MEDIUM
-@app.route('/create_session')
-def create_long_session():
-    """Session without expiration"""
-    from flask import session
-    session.permanent = True
-    # Vulnerable - no session timeout
-    session['user_id'] = request.args.get('user_id')
-    return "Session created"
-
-
-# 50. Cookie Without Secure Flag (CWE-614) - MEDIUM
-@app.route('/set_cookie')
-def set_insecure_cookie():
-    """Cookie without secure flag"""
-    from flask import make_response
-    resp = make_response("Cookie set")
-    # Vulnerable - can be intercepted over HTTP
-    resp.set_cookie('session_id', '12345', secure=False)
-    return resp
-
-
-# 51. Session Fixation (CWE-384) - HIGH
-@app.route('/login_session', methods=['POST'])
-def login_with_fixation():
-    """Session fixation vulnerability"""
-    from flask import session
+# 48. Insecure Session Management (CWE-384) - HIGH
+@app.route('/login', methods=['POST'])
+def login():
+    """Predictable session ID"""
     username = request.form.get('username')
-    # Vulnerable - doesn't regenerate session ID
-    session['username'] = username
+    session['user'] = username
+    session['id'] = str(random.randint(1000, 9999))  # Vulnerable - predictable
     return "Logged in"
 
+# 49. XML Bomb (CWE-776) - HIGH
+@app.route('/parse_large_xml', methods=['POST'])
+def parse_large_xml():
+    """Billion Laughs attack"""
+    xml_data = request.data
+    tree = ET.fromstring(xml_data)  # Vulnerable - no entity expansion limit
+    return "Parsed"
 
-# 52. Clickjacking (CWE-1021) - MEDIUM
-@app.route('/frame_page')
-def frameable_page():
-    """Missing X-Frame-Options header"""
-    # Vulnerable - can be framed by attacker
-    return "<h1>Clickable Content</h1>"
+# 50. Unquoted Search Path (CWE-428) - MEDIUM
+@app.route('/execute_tool')
+def execute_tool():
+    """Unquoted search path vulnerability"""
+    tool = request.args.get('tool')
+    os.system(tool)  # Vulnerable - relies on PATH
+    return "Tool executed"
 
+# ========== ADDITIONAL CODEQL-SPECIFIC VULNERABILITIES ==========
 
-# 53. Missing Content-Type Header (CWE-345) - LOW
-@app.route('/json_response')
-def json_without_content_type():
-    """JSON without proper content-type"""
-    # Vulnerable - browser may misinterpret
-    return '{"data": "value"}'
+# 51. Reflected XSS (CodeQL: py/reflective-xss)
+@app.route('/search')
+def search():
+    """Reflected XSS vulnerability"""
+    query = request.args.get('q', '')
+    return f"<html><body>Search results for: {query}</body></html>"  # Vulnerable
 
+# 52. SQL Injection with LIKE (CodeQL: py/sql-injection)
+@app.route('/search_users')
+def search_users():
+    """SQL injection in LIKE clause"""
+    search_term = request.args.get('term', '')
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    query = f"SELECT * FROM users WHERE name LIKE '%{search_term}%'"  # Vulnerable
+    cursor.execute(query)
+    return str(cursor.fetchall())
 
-# 54. Insecure File Upload Extension (CWE-434) - CRITICAL
-@app.route('/upload', methods=['POST'])
-def upload_any_file():
-    """No file extension validation"""
+# 53. Unsafe Shell Command (CodeQL: py/command-line-injection)
+@app.route('/backup')
+def backup_database():
+    """Shell command injection"""
+    db_name = request.args.get('db')
+    os.system(f'mysqldump {db_name} > backup.sql')  # Vulnerable
+    return "Backup created"
+
+# 54. Hardcoded Secret (CodeQL: py/hardcoded-credentials)
+DATABASE_PASSWORD = "MySecretPassword123!"  # Vulnerable
+AWS_SECRET_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"  # Vulnerable
+
+# 55. Path Injection (CodeQL: py/path-injection)
+@app.route('/read')
+def read_user_file():
+    """Path injection vulnerability"""
+    filename = request.args.get('filename')
+    with open(f'/home/user/{filename}', 'r') as f:  # Vulnerable
+        return f.read()
+
+# 56. Code Injection via exec (CodeQL: py/code-injection)
+@app.route('/run_code')
+def run_code():
+    """Code injection via exec"""
+    code = request.args.get('code')
+    exec(code)  # Vulnerable
+    return "Code executed"
+
+# 57. Unsafe URL redirect (CodeQL: py/url-redirection)
+@app.route('/go')
+def go_to_url():
+    """Unvalidated redirect"""
+    target = request.args.get('target')
+    return redirect(target)  # Vulnerable
+
+# 58. Clear-text logging of sensitive data (CodeQL: py/clear-text-logging-sensitive-data)
+@app.route('/login_attempt', methods=['POST'])
+def login_attempt():
+    """Logging sensitive data in clear text"""
+    username = request.form.get('username')
+    password = request.form.get('password')
+    logging.info(f"Login attempt: {username} with password {password}")  # Vulnerable
+    return "Login processed"
+
+# 59. LDAP Injection (CodeQL: py/ldap-injection)
+import ldap
+@app.route('/ldap_search')
+def ldap_search():
+    """LDAP injection vulnerability"""
+    username = request.args.get('user')
+    filter_str = f"(uid={username})"  # Vulnerable
+    return f"Searching with filter: {filter_str}"
+
+# 60. Use of insecure temporary file (CodeQL: py/insecure-temp-file)
+@app.route('/create_temp')
+def create_temp_file():
+    """Insecure temporary file creation"""
+    import tempfile
+    temp_file = tempfile.mktemp()  # Vulnerable - deprecated and insecure
+    with open(temp_file, 'w') as f:
+        f.write("sensitive data")
+    return temp_file
+
+# 61. Missing HTTPS (CodeQL: py/insecure-protocol)
+@app.route('/api_call')
+def make_api_call():
+    """Using insecure HTTP protocol"""
+    response = requests.get('http://api.example.com/data')  # Vulnerable - should use HTTPS
+    return response.text
+
+# 62. Arbitrary file write (CodeQL: py/arbitrary-file-write)
+@app.route('/write_file', methods=['POST'])
+def write_to_file():
+    """Arbitrary file write vulnerability"""
+    filepath = request.form.get('path')
+    content = request.form.get('content')
+    with open(filepath, 'w') as f:  # Vulnerable - no path validation
+        f.write(content)
+    return "File written"
+
+# 63. Regex Injection (CodeQL: py/regex-injection)
+import re
+@app.route('/match')
+def regex_match():
+    """Regex injection - ReDoS potential"""
+    pattern = request.args.get('pattern')
+    text = request.args.get('text')
+    result = re.search(pattern, text)  # Vulnerable
+    return str(result)
+
+# 64. DNS Rebinding (CodeQL: py/ssrf)
+@app.route('/proxy')
+def proxy_request():
+    """SSRF via DNS rebinding"""
+    url = request.args.get('url')
+    response = requests.get(url, timeout=5)  # Vulnerable - no URL validation
+    return response.content
+
+# 65. JWT Algorithm Confusion (CodeQL: py/jwt-none-algorithm)
+import jwt
+@app.route('/decode_token')
+def decode_token():
+    """JWT algorithm confusion"""
+    token = request.args.get('token')
+    decoded = jwt.decode(token, verify=False)  # Vulnerable - no verification
+    return str(decoded)
+
+# 66. Prototype Pollution equivalent (Attribute assignment)
+@app.route('/set_attr')
+def set_attribute():
+    """Unsafe attribute assignment"""
+    obj = type('obj', (object,), {})()
+    attr_name = request.args.get('attr')
+    attr_value = request.args.get('value')
+    setattr(obj, attr_name, attr_value)  # Vulnerable - can override important attributes
+    return f"Set {attr_name} to {attr_value}"
+
+# 67. NoSQL Injection (CodeQL: py/nosql-injection)
+from pymongo import MongoClient
+@app.route('/mongo_find')
+def mongo_find():
+    """NoSQL injection vulnerability"""
+    username = request.args.get('username')
+    client = MongoClient('mongodb://localhost:27017/')
+    db = client['mydb']
+    # Vulnerable - user input directly in query
+    result = db.users.find({"username": username})
+    return str(list(result))
+
+# 68. XML Injection (CodeQL: py/xml-injection)
+@app.route('/create_xml')
+def create_xml():
+    """XML injection vulnerability"""
+    name = request.args.get('name')
+    xml_string = f"<user><name>{name}</name></user>"  # Vulnerable
+    return xml_string
+
+# 69. HTTP Response Splitting (CodeQL: py/http-response-splitting)
+@app.route('/set_custom_header')
+def set_custom_header():
+    """HTTP response splitting"""
+    header_value = request.args.get('value')
+    resp = make_response("OK")
+    resp.headers['X-Custom-Header'] = header_value  # Vulnerable - no newline filtering
+    return resp
+
+# 70. Deserialization of untrusted data with marshal (CodeQL: py/unsafe-deserialization)
+import marshal
+@app.route('/unmarshal', methods=['POST'])
+def unmarshal_data():
+    """Unsafe deserialization with marshal"""
+    data = request.data
+    obj = marshal.loads(data)  # Vulnerable
+    return str(obj)
+
+# 71. Use of weak hash for security (CodeQL: py/weak-cryptographic-algorithm)
+@app.route('/hash_sha1')
+def hash_with_sha1():
+    """Using weak SHA1 for security purposes"""
+    data = request.args.get('data')
+    hashed = hashlib.sha1(data.encode()).hexdigest()  # Vulnerable - SHA1 is weak
+    return hashed
+
+# 72. Incomplete URL substring sanitization (CodeQL: py/incomplete-url-substring-sanitization)
+@app.route('/safe_redirect')
+def safe_redirect():
+    """Incomplete URL validation"""
+    url = request.args.get('url')
+    if 'example.com' in url:  # Vulnerable - can be bypassed with evil.example.com
+        return redirect(url)
+    return "Invalid URL"
+
+# 73. ZIP Slip (CodeQL: py/zipslip)
+import zipfile
+@app.route('/extract_zip', methods=['POST'])
+def extract_zip():
+    """ZIP slip vulnerability"""
+    zip_file = request.files['file']
+    zip_path = '/tmp/upload.zip'
+    zip_file.save(zip_path)
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall('/tmp/extracted/')  # Vulnerable - no path validation
+    return "Extracted"
+
+# 74. Timing Attack (CodeQL: py/timing-attack)
+@app.route('/verify_token')
+def verify_token():
+    """Timing attack vulnerability"""
+    token = request.args.get('token')
+    expected = "secret_token_12345"
+    if token == expected:  # Vulnerable - timing attack possible
+        return "Valid"
+    return "Invalid"
+
+# 75. Incomplete hostname regex (CodeQL: py/incomplete-hostname-regexp)
+@app.route('/validate_host')
+def validate_host():
+    """Incomplete hostname validation"""
+    host = request.args.get('host')
+    if re.match(r'.*\.example\.com', host):  # Vulnerable - missing anchor
+        return "Valid host"
+    return "Invalid host"
+
+# 76. Use of unmaintained dependency (Implicit in imports)
+import pickle  # Known security issues
+
+# 77. Sensitive data exposure in exceptions
+@app.route('/process_payment')
+def process_payment():
+    """Exposing sensitive data in exceptions"""
+    card_number = request.args.get('card')
+    try:
+        # Process payment
+        if len(card_number) != 16:
+            raise ValueError(f"Invalid card number: {card_number}")  # Vulnerable - leaking card number
+    except Exception as e:
+        return str(e)
+    return "Processed"
+
+# 78. Uncontrolled data in SQL LIMIT/OFFSET (CodeQL: py/sql-injection)
+@app.route('/paginate')
+def paginate_results():
+    """SQL injection in LIMIT clause"""
+    limit = request.args.get('limit', '10')
+    offset = request.args.get('offset', '0')
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    query = f"SELECT * FROM users LIMIT {limit} OFFSET {offset}"  # Vulnerable
+    cursor.execute(query)
+    return str(cursor.fetchall())
+
+# 79. CSRF token not validated (CodeQL: py/csrf)
+@app.route('/change_email', methods=['POST'])
+def change_email():
+    """CSRF - token not checked"""
+    new_email = request.form.get('email')
+    # No CSRF token validation - Vulnerable
+    return f"Email changed to {new_email}"
+
+# 80. Inadequate padding oracle protection
+from Crypto.Cipher import AES
+@app.route('/decrypt')
+def decrypt_data():
+    """Padding oracle vulnerability"""
+    ciphertext = request.args.get('data')
+    key = b'Sixteen byte key'
+    cipher = AES.new(key, AES.MODE_CBC, b'1234567890123456')
+    try:
+        decrypted = cipher.decrypt(base64.b64decode(ciphertext))
+        return decrypted.decode()
+    except Exception as e:
+        return str(e)  # Vulnerable - leaking padding information
+
+# 81. Insecure JWT signature verification
+@app.route('/verify_jwt')
+def verify_jwt():
+    """Weak JWT verification"""
+    token = request.args.get('token')
+    try:
+        decoded = jwt.decode(token, options={"verify_signature": False})  # Vulnerable
+        return str(decoded)
+    except Exception as e:
+        return str(e)
+
+# 82. Missing rate limiting
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    """No rate limiting on authentication endpoint"""
+    # No rate limiting - Vulnerable to brute force
+    username = request.form.get('username')
+    password = request.form.get('password')
+    return "Login processed"
+
+# 83. Server-side include injection
+@app.route('/include')
+def server_side_include():
+    """SSI injection"""
+    page = request.args.get('page')
+    template = f"<!--#include virtual='{page}' -->"  # Vulnerable
+    return template
+
+# 84. Unvalidated email redirect
+@app.route('/confirm_email')
+def confirm_email():
+    """Email confirmation redirect without validation"""
+    redirect_url = request.args.get('redirect')
+    # Verify email logic here
+    return redirect(redirect_url)  # Vulnerable
+
+# 85. Format string vulnerability
+@app.route('/format')
+def format_string():
+    """Format string vulnerability"""
+    template = request.args.get('template')
+    value = request.args.get('value')
+    result = template % value  # Vulnerable
+    return result
+
+# 86. Insecure randomness for session IDs
+import uuid
+@app.route('/create_session')
+def create_session():
+    """Weak session ID generation"""
+    session_id = str(random.random())  # Vulnerable - predictable
+    return f"Session created: {session_id}"
+
+# 87. Unsafe yaml.load
+@app.route('/load_config', methods=['POST'])
+def load_config():
+    """Unsafe YAML deserialization"""
+    config_data = request.data
+    config = yaml.load(config_data, Loader=yaml.Loader)  # Vulnerable - allows code execution
+    return str(config)
+
+# 88. Unrestricted file size upload
+@app.route('/upload_large', methods=['POST'])
+def upload_large_file():
+    """No file size limit"""
     file = request.files['file']
-    # Vulnerable - allows .php, .exe, etc.
+    # No size check - Vulnerable to DoS
     file.save(f'/uploads/{file.filename}')
     return "Uploaded"
 
+# 89. Cookie without SameSite attribute
+@app.route('/set_auth_cookie')
+def set_auth_cookie():
+    """Cookie without SameSite protection"""
+    resp = make_response("Authenticated")
+    resp.set_cookie('auth', 'token123')  # Vulnerable - no SameSite attribute
+    return resp
 
-# 55. Directory Listing Enabled (CWE-548) - LOW
-@app.route('/files/<path:filename>')
-def serve_file(filename):
-    """Directory traversal in file serving"""
-    from flask import send_from_directory
-    # Vulnerable - may expose directory structure
-    return send_from_directory('/var/www/files/', filename)
+# 90. Hardcoded cryptographic key
+ENCRYPTION_KEY = b'this_is_my_32_byte_encryption!!'  # Vulnerable
 
+# 91. Unicode normalization bypass
+@app.route('/check_username')
+def check_username():
+    """Unicode normalization vulnerability"""
+    username = request.args.get('username')
+    blocked = ['admin', 'root']
+    if username in blocked:  # Vulnerable - unicode variants can bypass
+        return "Blocked"
+    return "Allowed"
 
-# 56. Cleartext Transmission of Sensitive Data (CWE-319) - HIGH
-@app.route('/send_password')
-def send_password_http():
-    """Sending password over HTTP"""
-    password = request.args.get('password')
-    # Vulnerable - no HTTPS enforcement
-    return f"Password received: {password}"
-
-
-# 57. Improper Input Validation - Email (CWE-20) - MEDIUM
-@app.route('/send_email')
-def send_email_no_validation():
-    """Email injection"""
-    to = request.args.get('to', '')
-    subject = request.args.get('subject', '')
-    # Vulnerable - no email format validation
-    return f"Sending to: {to}"
-
-
-# 58. LDAP Injection via bind (CWE-90) - HIGH
-@app.route('/ldap_bind')
-def ldap_bind_injection():
-    """LDAP bind injection"""
-    username = request.args.get('username', '')
-    password = request.args.get('password', '')
-    # Vulnerable - unsanitized LDAP bind
-    dn = f"uid={username},ou=users,dc=example,dc=com"
-    return f"Binding to: {dn}"
-
-
-# 59. XPath Injection (CWE-643) - HIGH
-@app.route('/xpath_query')
-def xpath_injection():
-    """XPath injection vulnerability"""
-    from lxml import etree
-    username = request.args.get('username', '')
-    xml = etree.parse('users.xml')
-    # Vulnerable - XPath injection
-    query = f"//user[username='{username}']"
-    result = xml.xpath(query)
-    return str(result)
-
-
-# 60. Format String Vulnerability (CWE-134) - MEDIUM
-@app.route('/format_log')
-def format_string_vuln():
-    """Format string vulnerability"""
-    user_input = request.args.get('msg', '')
-    # Vulnerable - user controls format string
-    log_message = f"{user_input}"  # If used in C extensions
-    return log_message
-
-
-# 61. Integer Overflow (CWE-190) - MEDIUM
-@app.route('/allocate_buffer')
-def integer_overflow():
-    """Integer overflow in size calculation"""
-    size = int(request.args.get('size', '100'))
-    count = int(request.args.get('count', '100'))
-    # Vulnerable - no overflow check
-    total_size = size * count
-    buffer = bytearray(total_size)
-    return f"Allocated {total_size} bytes"
-
-
-# 62. Use After Free (CWE-416) - HIGH
-@app.route('/cache_operation')
-def use_after_free():
-    """Simulated use-after-free"""
-    cache = {}
-    key = request.args.get('key', '')
-    # Vulnerable pattern - accessing deleted reference
-    if key in cache:
-        del cache[key]
-    return str(cache.get(key, 'None'))
-
-
-# 63. Double Free (CWE-415) - HIGH
-@app.route('/free_memory')
-def double_free():
-    """Double free simulation"""
-    data = request.args.get('data', '')
-    # Vulnerable - freeing same resource twice
-    temp = bytearray(data.encode())
-    del temp
-    del temp  # Double free
-    return "Freed"
-
-
-# 64. Null Pointer Dereference (CWE-476) - MEDIUM
-@app.route('/access_null')
-def null_pointer():
-    """Null pointer dereference"""
-    obj = None
-    if request.args.get('init') != 'true':
-        obj = None
-    # Vulnerable - accessing None
-    return str(obj.value)  # AttributeError
-
-
-# 65. Uninitialized Variable (CWE-457) - LOW
-@app.route('/use_uninit')
-def use_uninitialized():
-    """Using uninitialized variable"""
-    if request.args.get('flag') == 'true':
-        result = "initialized"
-    # Vulnerable - result may be uninitialized
-    return result
-
-
-# 66. Missing Error Handling (CWE-391) - LOW
-@app.route('/risky_operation')
-def no_error_handling():
-    """Missing try-catch for critical operation"""
-    # Vulnerable - no error handling
-    value = int(request.args.get('num'))
-    result = 100 / value
-    return str(result)
-
-
-# 67. Improper Resource Shutdown (CWE-404) - MEDIUM
-@app.route('/open_file_leak')
-def file_descriptor_leak():
-    """File descriptor leak"""
-    filename = request.args.get('file', 'data.txt')
-    # Vulnerable - file not closed on exception
-    f = open(filename, 'r')
-    data = f.read()
-    return data
-
-
-# 68. Time-of-Check Time-of-Use (TOCTOU) (CWE-367) - MEDIUM
-@app.route('/toctou')
-def toctou_race():
-    """TOCTOU race condition"""
-    filename = request.args.get('file', 'temp.txt')
-    # Vulnerable - check and use not atomic
-    if os.path.exists(filename):
-        with open(filename, 'r') as f:
-            return f.read()
-    return "Not found"
-
-
-# 69. Insecure Temporary File (CWE-377) - MEDIUM
-@app.route('/create_temp')
-def insecure_temp_file():
-    """Predictable temporary file"""
-    import tempfile
-    # Vulnerable - predictable temp file name
-    temp_path = f"/tmp/upload_{request.remote_addr}.txt"
-    with open(temp_path, 'w') as f:
-        f.write("data")
-    return temp_path
-
-
-# 70. Weak Password Recovery (CWE-640) - MEDIUM
-@app.route('/recover_password')
-def weak_password_recovery():
-    """Weak password recovery mechanism"""
-    email = request.args.get('email', '')
-    # Vulnerable - predictable token
-    token = hashlib.md5(email.encode()).hexdigest()[:6]
-    return f"Recovery token: {token}"
-
-
-# 71. Username Enumeration (CWE-204) - LOW
-@app.route('/check_user')
-def username_enumeration():
-    """Username enumeration via error messages"""
-    username = request.args.get('username', '')
-    if username == 'admin':
-        return "User exists, password incorrect"
-    return "User does not exist"
-
-
-# 72. Account Lockout Not Implemented (CWE-307) - MEDIUM
-@app.route('/login_no_lockout', methods=['POST'])
-def login_without_lockout():
-    """No account lockout mechanism"""
-    username = request.form.get('username')
-    password = request.form.get('password')
-    # Vulnerable - unlimited login attempts
-    return "Login failed"
-
-
-# 73. Privilege Escalation (CWE-269) - CRITICAL
-@app.route('/change_role')
-def change_user_role():
-    """Privilege escalation vulnerability"""
-    user_id = request.args.get('user_id')
-    role = request.args.get('role', 'user')
-    # Vulnerable - no permission check
-    return f"User {user_id} role changed to {role}"
-
-
-# 74. Hardcoded Cryptographic Key (CWE-321) - HIGH
-def encrypt_data_hardcoded():
-    """Hardcoded encryption key"""
-    from cryptography.fernet import Fernet
-    # Vulnerable - hardcoded key
-    key = b'ZmRzZmdkc2ZnZHNmZ2RzZmdkc2ZnZHNmZ2RzZmdkc2Y='
-    f = Fernet(key)
-    return f
-
-
-# 75. Insufficient Entropy (CWE-331) - MEDIUM
-@app.route('/generate_session_id')
-def generate_weak_session_id():
-    """Weak session ID generation"""
-    import random
-    # Vulnerable - insufficient entropy
-    session_id = str(random.randint(1000, 9999))
-    return session_id
-
-
-# 76. Insecure SSL/TLS Configuration (CWE-327) - HIGH
-def create_insecure_ssl_context():
-    """Weak SSL/TLS configuration"""
-    import ssl
-    context = ssl.SSLContext(ssl.PROTOCOL_SSLv3)  # Vulnerable - SSLv3
-    return context
-
-
-# 77. Certificate Validation Disabled (CWE-295) - HIGH
-@app.route('/https_no_verify')
-def https_without_verification():
-    """HTTPS without certificate verification"""
-    import requests
-    url = request.args.get('url', '')
-    # Vulnerable - cert verification disabled
-    r = requests.get(url, verify=False)
-    return r.text
-
-
-# 78. Weak Cipher Suite (CWE-326) - MEDIUM
-def use_weak_cipher():
-    """Using weak cipher algorithm"""
-    from Crypto.Cipher import DES
-    key = b'12345678'
-    # Vulnerable - DES is weak
-    cipher = DES.new(key, DES.MODE_ECB)
-    return cipher
-
-
-# 79. Insufficient Key Length (CWE-326) - MEDIUM
-def generate_short_key():
-    """Insufficient key length"""
-    from Crypto.Random import get_random_bytes
-    # Vulnerable - too short for RSA
-    key = get_random_bytes(8)
-    return key
-
-
-# 80. Predictable Seed (CWE-336) - MEDIUM
-@app.route('/random_with_seed')
-def predictable_random():
-    """Predictable random due to seed"""
-    import random
-    # Vulnerable - predictable seed
-    random.seed(12345)
-    value = random.randint(1, 1000)
-    return str(value)
-
-
-# 81. SQL Injection in Stored Procedure (CWE-89) - HIGH
-@app.route('/call_procedure')
-def sql_injection_procedure():
-    """SQL injection in stored procedure call"""
-    import sqlite3
-    user_id = request.args.get('id', '')
-    conn = sqlite3.connect('db.sqlite')
-    # Vulnerable - unsanitized procedure call
-    query = f"CALL get_user('{user_id}')"
-    conn.execute(query)
-    return "Called"
-
-
-# 82. OS Command Injection via subprocess (CWE-78) - CRITICAL
-@app.route('/run_subprocess')
-def subprocess_injection():
-    """Command injection via subprocess"""
-    import subprocess
-    filename = request.args.get('file', '')
-    # Vulnerable - shell=True with user input
-    subprocess.call(f"cat {filename}", shell=True)
+# 92. Subprocess without shell but still vulnerable
+@app.route('/run_command')
+def run_command():
+    """Command injection via subprocess.call"""
+    command = request.args.get('cmd')
+    subprocess.call([command])  # Vulnerable if command contains shell metacharacters
     return "Executed"
 
+# 93. Pickle with untrusted data
+@app.route('/load_pickle', methods=['POST'])
+def load_pickle():
+    """Pickle deserialization"""
+    data = request.files['file'].read()
+    obj = pickle.loads(data)  # Vulnerable
+    return str(type(obj))
 
-# 83. File Inclusion (CWE-98) - HIGH
-@app.route('/include_file')
-def remote_file_inclusion():
-    """Remote file inclusion"""
-    file_path = request.args.get('path', '')
-    # Vulnerable - includes arbitrary files
-    with open(file_path, 'r') as f:
-        exec(f.read())
-    return "Included"
+# 94. Missing Content-Type validation
+@app.route('/upload_json', methods=['POST'])
+def upload_json():
+    """Missing Content-Type validation"""
+    # No Content-Type check - Vulnerable
+    data = request.get_json(force=True)
+    return str(data)
 
+# 95. Improper access control
+@app.route('/user/<user_id>/profile')
+def user_profile(user_id):
+    """Missing access control check"""
+    # No check if current user can access this profile - Vulnerable
+    return f"Profile for user {user_id}"
 
-# 84. CRLF Injection (CWE-93) - MEDIUM
-@app.route('/log_crlf')
-def crlf_injection():
-    """CRLF injection in logs"""
-    import logging
-    user_input = request.args.get('data', '')
-    # Vulnerable - CRLF not sanitized
-    logging.info(user_input)
-    return "Logged"
+# 96. Insecure deserialization with jsonpickle
+import jsonpickle
+@app.route('/deserialize_json', methods=['POST'])
+def deserialize_json():
+    """Insecure deserialization with jsonpickle"""
+    data = request.data.decode()
+    obj = jsonpickle.decode(data)  # Vulnerable
+    return str(obj)
 
+# 97. Unvalidated HTTP header injection
+@app.route('/set_location')
+def set_location():
+    """HTTP header injection"""
+    location = request.args.get('location')
+    resp = make_response("Redirecting")
+    resp.headers['Location'] = location  # Vulnerable
+    return resp
 
-# 85. CSV Injection (CWE-1236) - MEDIUM
-@app.route('/export_csv')
-def csv_injection():
-    """CSV injection vulnerability"""
-    import csv
-    import io
-    user_data = request.args.get('data', '')
-    output = io.StringIO()
-    writer = csv.writer(output)
-    # Vulnerable - formula injection in CSV
-    writer.writerow([user_data])
-    return output.getvalue()
+# 98. Missing authentication on WebSocket
+# Simulated WebSocket endpoint
+@app.route('/ws')
+def websocket():
+    """WebSocket without authentication"""
+    # No authentication check - Vulnerable
+    return "WebSocket connected"
 
+# 99. Unsafe use of globals for request data
+user_data = {}  # Global variable - Vulnerable to race conditions
+@app.route('/store_data')
+def store_data():
+    """Using global variable for request-specific data"""
+    user_id = request.args.get('user_id')
+    data = request.args.get('data')
+    user_data[user_id] = data  # Vulnerable - race condition
+    return "Stored"
 
-# 86. MIME Sniffing (CWE-430) - LOW
-@app.route('/download_file')
-def download_without_content_type():
-    """Missing X-Content-Type-Options"""
-    from flask import send_file
-    # Vulnerable - browser may sniff content type
-    return send_file('document.pdf')
+# 100. Information disclosure via debug endpoints
+@app.route('/debug/vars')
+def debug_vars():
+    """Debug endpoint exposing internal state"""
+    return str(globals())  # Vulnerable - exposes all variables
 
+# 101. Prompt Injection (LLM/AI Vulnerability)
+@app.route('/ai_chat', methods=['POST'])
+def ai_chat():
+    """Prompt injection vulnerability in AI/LLM integration"""
+    user_prompt = request.form.get('prompt')
+    system_prompt = "You are a helpful assistant. Only answer questions about our products."
+    # Vulnerable - user input directly concatenated with system prompt
+    full_prompt = f"{system_prompt}\n\nUser: {user_prompt}"
+    # Simulating AI call - in real scenario would call OpenAI/etc
+    return f"AI Response based on: {full_prompt}"
 
-# 87. Insufficient Transport Layer Protection (CWE-319) - HIGH
-@app.route('/mixed_content')
-def mixed_content():
-    """Loading resources over HTTP"""
-    # Vulnerable - mixed content
-    html = '<script src="http://example.com/script.js"></script>'
+# 102. Missing Webhook Verification (GitHub, Stripe, etc.)
+@app.route('/webhook/github', methods=['POST'])
+def github_webhook():
+    """Missing webhook signature verification"""
+    payload = request.get_json()
+    # Vulnerable - no HMAC signature verification
+    # Should verify X-Hub-Signature-256 header
+    return f"Processing webhook: {payload}"
+
+@app.route('/webhook/stripe', methods=['POST'])
+def stripe_webhook():
+    """Missing Stripe webhook signature verification"""
+    payload = request.data
+    # Vulnerable - no signature verification
+    # Should verify using stripe.Webhook.construct_event()
+    return "Webhook received"
+
+# 103. Enhanced Prototype Pollution via __class__ manipulation
+@app.route('/pollute_class')
+def pollute_class():
+    """Prototype pollution via class attribute manipulation"""
+    attr = request.args.get('attr')
+    value = request.args.get('value')
+    obj = {}
+    # Vulnerable - can manipulate __class__, __bases__, etc.
+    if hasattr(obj.__class__, attr):
+        setattr(obj.__class__, attr, value)
+    return f"Modified class attribute: {attr}"
+
+# 104. Advanced SQL Injection - Second Order
+@app.route('/store_search', methods=['POST'])
+def store_search():
+    """Second-order SQL injection"""
+    search_term = request.form.get('search')
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    # Store malicious input
+    cursor.execute("INSERT INTO search_history (term) VALUES (?)", (search_term,))
+    conn.commit()
+    return "Search stored"
+
+@app.route('/replay_search/<int:search_id>')
+def replay_search(search_id):
+    """Replaying stored search - vulnerable"""
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    cursor.execute(f"SELECT term FROM search_history WHERE id = {search_id}")
+    stored_term = cursor.fetchone()[0]
+    # Vulnerable - using stored (potentially malicious) data in query
+    query = f"SELECT * FROM products WHERE name = '{stored_term}'"
+    cursor.execute(query)
+    return str(cursor.fetchall())
+
+# 105. Enhanced Command Injection - Multiple vectors
+@app.route('/multi_cmd_injection')
+def multi_command_injection():
+    """Multiple command injection vectors"""
+    cmd = request.args.get('cmd')
+    # All vulnerable variations
+    os.system(cmd)  # Method 1
+    os.popen(cmd).read()  # Method 2
+    subprocess.Popen(cmd, shell=True)  # Method 3
+    return "Commands executed"
+
+# 106. Enhanced Reflected XSS - Multiple contexts
+@app.route('/xss_multi')
+def xss_multiple_contexts():
+    """XSS in multiple contexts"""
+    input_data = request.args.get('data', '')
+    html = f'''
+    <html>
+    <head><title>{input_data}</title></head>
+    <body>
+        <div id="content">{input_data}</div>
+        <script>var data = "{input_data}";</script>
+        <a href="/page?q={input_data}">Link</a>
+    </body>
+    </html>
+    '''  # Vulnerable in multiple contexts
     return html
 
+# 107. Enhanced Path Traversal - Multiple techniques
+@app.route('/path_traversal_advanced')
+def advanced_path_traversal():
+    """Advanced path traversal with multiple encoding"""
+    filename = request.args.get('file')
+    paths = [
+        f'/var/www/{filename}',  # Basic
+        f'/files/{filename}',     # Relative
+        filename,                  # Absolute
+    ]
+    # Vulnerable - no sanitization of ../, %2e%2e/, etc.
+    with open(paths[0], 'r') as f:
+        return f.read()
 
-# 88. Weak Hashing for Integrity (CWE-328) - MEDIUM
-@app.route('/checksum')
-def weak_checksum():
-    """Weak hash for integrity check"""
-    data = request.args.get('data', '')
-    # Vulnerable - MD5 for integrity
-    checksum = hashlib.md5(data.encode()).hexdigest()
-    return checksum
+# 108. Enhanced SSRF - Internal network access
+@app.route('/ssrf_internal')
+def ssrf_internal_access():
+    """SSRF targeting internal resources"""
+    url = request.args.get('url')
+    # Vulnerable - can access internal services, cloud metadata, etc.
+    # Examples: http://169.254.169.254/latest/meta-data/
+    #          http://localhost:6379/ (Redis)
+    #          http://localhost:9200/ (Elasticsearch)
+    response = requests.get(url, timeout=10)
+    return response.text
 
-
-# 89. Information Leakage via Debug Info (CWE-215) - LOW
-@app.route('/debug_info')
-def leak_debug_info():
-    """Leaking debug information"""
-    # Vulnerable - exposes internal state
-    return str(globals())
-
-
-# 90. Server Banner Disclosure (CWE-200) - LOW
-@app.route('/server_info')
-def server_banner():
-    """Server information disclosure"""
-    import sys
-    # Vulnerable - exposes server details
-    return f"Python {sys.version}, Flask"
-
-
-# 91. Memory Leak (CWE-401) - MEDIUM
-global_cache = []
-@app.route('/cache_data')
-def memory_leak():
-    """Memory leak via unbounded cache"""
-    data = request.args.get('data', '') * 1000
-    # Vulnerable - unbounded growth
-    global_cache.append(data)
-    return f"Cached {len(global_cache)} items"
-
-
-# 92. Stack Overflow (CWE-121) - HIGH
-@app.route('/recursive')
-def stack_overflow():
-    """Stack overflow via deep recursion"""
-    depth = int(request.args.get('depth', '1000'))
-    
-    def recurse(n):
-        if n > 0:
-            return recurse(n - 1)  # Vulnerable - no limit
-        return "Done"
-    
-    return recurse(depth)
-
-
-# 93. Uncontrolled Memory Allocation (CWE-789) - HIGH
-@app.route('/allocate_memory')
-def uncontrolled_allocation():
-    """Uncontrolled memory allocation"""
-    size = int(request.args.get('size', '1000'))
-    # Vulnerable - no size limit
-    data = bytearray(size * 1024 * 1024)
-    return f"Allocated {len(data)} bytes"
-
-
-# 94. Improper Neutralization of Special Elements (CWE-75) - MEDIUM
-@app.route('/process_special')
-def special_chars_not_neutralized():
-    """Special characters not neutralized"""
-    data = request.args.get('data', '')
-    # Vulnerable - special chars not handled
-    return eval(f"'{data}'")
-
-
-# 95. Missing Authentication (CWE-306) - CRITICAL
-@app.route('/admin/panel')
-def admin_panel_no_auth():
-    """Admin panel without authentication"""
-    # Vulnerable - no authentication check
-    return "Admin Panel - Full Access"
-
-
-# 96. Broken Access Control (CWE-284) - HIGH
-@app.route('/user/<user_id>/data')
-def access_user_data(user_id):
-    """No access control check"""
-    # Vulnerable - any user can access any user's data
-    return f"Data for user {user_id}"
-
-
-# 97. Insecure Default Configuration (CWE-1188) - MEDIUM
-def create_app_with_defaults():
-    """Insecure default configuration"""
-    # Vulnerable - debug mode, weak secret
-    app.config['DEBUG'] = True
-    app.config['SECRET_KEY'] = 'default'
-    return app
-
-
-# 98. Exposure of Private Information (CWE-359) - MEDIUM
-@app.route('/user_profile')
-def expose_private_info():
-    """Exposing private user information"""
-    # Vulnerable - returns sensitive data
-    user = {'name': 'John', 'ssn': '123-45-6789', 'password': 'secret'}
+# 109. Enhanced NoSQL Injection - MongoDB operator injection
+@app.route('/nosql_operator_injection')
+def nosql_operator_injection():
+    """NoSQL injection using MongoDB operators"""
+    username = request.args.get('username')
+    password = request.args.get('password')
+    client = MongoClient('mongodb://localhost:27017/')
+    db = client['mydb']
+    # Vulnerable - can inject operators like $ne, $gt, etc.
+    # Example: ?username[$ne]=invalid&password[$ne]=invalid
+    user = db.users.find_one({"username": username, "password": password})
     return str(user)
 
+# 110. Enhanced JWT vulnerabilities - Multiple issues
+@app.route('/jwt_vulnerable')
+def jwt_multiple_issues():
+    """Multiple JWT vulnerabilities"""
+    token = request.args.get('token')
+    # Issue 1: None algorithm
+    decoded1 = jwt.decode(token, options={"verify_signature": False})
+    # Issue 2: Weak secret
+    decoded2 = jwt.decode(token, "secret", algorithms=["HS256"])
+    # Issue 3: No expiration check
+    decoded3 = jwt.decode(token, "key", options={"verify_exp": False})
+    return str(decoded1)
 
-# 99. Insufficient Randomness for Security (CWE-330) - MEDIUM
-@app.route('/password_reset_token')
-def weak_reset_token():
-    """Weak password reset token"""
-    import random
-    import string
-    # Vulnerable - predictable token
-    token = ''.join(random.choices(string.ascii_letters, k=6))
-    return token
+# 111. Enhanced Open Redirect - Multiple bypass techniques
+@app.route('/redirect_advanced')
+def advanced_open_redirect():
+    """Open redirect with weak validation"""
+    url = request.args.get('url')
+    # Weak validation - can be bypassed
+    if url.startswith('/'):  # Vulnerable - //evil.com bypasses this
+        return redirect(url)
+    if 'example.com' in url:  # Vulnerable - evil-example.com.attacker.com bypasses
+        return redirect(url)
+    return redirect(url)  # No validation at all
 
+# 112. Enhanced Insecure Random - Predictable tokens
+@app.route('/predictable_tokens')
+def predictable_tokens():
+    """Multiple insecure random implementations"""
+    # All vulnerable - predictable
+    token1 = str(random.randint(100000, 999999))
+    token2 = str(random.random())
+    token3 = base64.b64encode(str(random.getrandbits(64)).encode()).decode()
+    
+    # Storing with predictable IDs
+    session_id = random.randrange(1000, 9999)
+    return f"Tokens: {token1}, {token2}, {token3}, SessionID: {session_id}"
 
-# 100. Trust Boundary Violation (CWE-501) - MEDIUM
-@app.route('/process_trusted_data')
-def trust_boundary_violation():
-    """Trusting user data without validation"""
-    user_role = request.args.get('role', 'user')
-    # Vulnerable - trusts user-provided role
-    if user_role == 'admin':
-        return "Admin access granted"
-    return "User access"
+# 113. Enhanced ReDoS - Multiple vulnerable patterns
+@app.route('/redos_patterns')
+def redos_vulnerable_patterns():
+    """Multiple ReDoS vulnerable regex patterns"""
+    text = request.args.get('text', '')
+    patterns = [
+        r'^(a+)+$',                    # Exponential backtracking
+        r'(a*)*b',                     # Nested quantifiers
+        r'(a|a)*',                     # Alternation with overlap
+        r'(a|ab)*c',                   # Overlapping alternation
+        r'([a-z]+)*[A-Z]',            # Greedy quantifier
+    ]
+    results = []
+    for pattern in patterns:
+        try:
+            match = re.search(pattern, text, timeout=5)  # Vulnerable - no timeout in older Python
+            results.append(str(match))
+        except:
+            results.append("timeout")
+    return str(results)
+
+# 114. Enhanced Mass Assignment - ORM manipulation
+@app.route('/mass_assign_orm', methods=['POST'])
+def mass_assignment_orm():
+    """Mass assignment via ORM-style update"""
+    user_id = request.form.get('id')
+    updates = request.form.to_dict()
+    
+    # Vulnerable - allows updating any field including is_admin, role, etc.
+    user = {"id": user_id}
+    for key, value in updates.items():
+        user[key] = value  # No whitelist
+    
+    # Could allow: is_admin=true, role=admin, balance=999999
+    return f"Updated user: {user}"
+
+# 115. Enhanced Code Injection - Multiple dangerous functions
+@app.route('/code_injection_multi')
+def code_injection_multiple():
+    """Multiple code injection vectors"""
+    code = request.args.get('code')
+    
+    # All dangerous
+    eval(code)                          # Direct eval
+    exec(code)                          # Direct exec
+    compile(code, '<string>', 'exec')  # Compile
+    __import__('os').system(code)      # Import and execute
+    
+    return "Code executed via multiple methods"
+
+# 116. Enhanced Hardcoded Credentials - Multiple types
+# Database credentials
+DB_USER = "admin"
+DB_PASS = "P@ssw0rd123!"
+DB_HOST = "prod-db.internal.company.com"
+
+# API Keys and tokens
+OPENAI_API_KEY = "sk-proj-1234567890abcdefghijklmnopqrstuvwxyz"
+STRIPE_SECRET_KEY = "sk_live_51234567890"
+AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"
+AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+# Private keys
+PRIVATE_KEY = """-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEA1234567890...
+-----END RSA PRIVATE KEY-----"""
+
+JWT_SECRET = "super-secret-jwt-key-that-should-not-be-here"
+
+@app.route('/use_hardcoded_creds')
+def use_hardcoded_credentials():
+    """Using hardcoded credentials"""
+    connection_string = f"mysql://{DB_USER}:{DB_PASS}@{DB_HOST}/database"
+    return f"Connecting with: {connection_string}"
 
 
 if __name__ == '__main__':
